@@ -27,12 +27,92 @@ class PruebaViewModel(application: Application) : AndroidViewModel(application) 
     val estado: StateFlow<PruebaUiState> = _estado
 
     // Si se está corrigiendo, la prueba tal como estaba guardada
+    private var original: PruebaEntity? = null
 
     /**
      * Se llama al abrir la pantalla (una sola vez).
      * visitaId = null si es fuera de una visita. pruebaId = la prueba a corregir (null = nueva).
      */
+    fun cargar(equipoId: Long, visitaId: Long?, pruebaId: Long? = null) {
+        if (_estado.value.equipoId == equipoId) return
+        if (pruebaId != null) {
+            cargarCorreccion(pruebaId, equipoId)
+            return
+        }
+        viewModelScope.launch {
+            val equipo = repositorio.obtenerEquipo(equipoId) ?: return@launch
+            val sesion = preferencias.obtenerSesion().first()
+            val opciones = repositorio.pruebasActivasPara(equipo.tipo)
+            // Solo se liga a la visita si no está cerrada y el equipo está en ella
+            val visita = visitaId?.let { repositorio.obtenerVisita(it) }?.takeIf { v ->
+                v.estado != EstadosVisita.CERRADA &&
+                        repositorio.observarEquiposDeVisita(v.id).first().any { it.equipo.id == equipoId }
+            }
+            val condiciones = visita?.let { v ->
+                v.temperatura?.let { t ->
+                    val humedad = v.humedad?.let { h -> Reglas.formatearNumero(h) } ?: "—"
+                    val instrumentos = v.instrumentos.split(",").filter { it.isNotBlank() }.joinToString { Instrumentos.nombre(it) }
+                    "${Reglas.formatearNumero(t)} °C · $humedad % humedad · $instrumentos"
+                }
+            }
+            // Preselecciona la primera prueba que todavía no se hizo en esta visita
+            val hechas = visita?.let { repositorio.tiposHechosEnVisita(equipoId, it.id) }.orEmpty()
+            val primera = opciones.firstOrNull { it.nombre !in hechas } ?: opciones.firstOrNull()
+            _estado.update {
+                it.copy(
+                    equipoId = equipo.id,
+                    visitaId = visita?.id,
+                    numeroVisita = visita?.numero.orEmpty(),
+                    codigoEquipo = equipo.codigo,
+                    tipoEquipo = equipo.tipo,
+                    opciones = opciones,
+                    condicionesVisita = condiciones,
+                    temperatura = visita?.temperatura?.let { t -> Reglas.formatearNumero(t) }.orEmpty(),
+                    tecnico = sesion?.nombre.orEmpty()
+                )
+            }
+            primera?.let { onTipoPruebaChange(it.id) }
+        }
+    }
 
+    /** CORREGIR: carga la prueba guardada con el criterio que se usó ESE día. */
+    private fun cargarCorreccion(pruebaId: Long, equipoId: Long) {
+        viewModelScope.launch {
+            // Regla: solo se corrige si la prueba es de este equipo y su visita no está cerrada
+            val prueba = repositorio.obtenerPrueba(pruebaId)
+                ?.takeIf { it.equipoId == equipoId && repositorio.sePuedeCorregir(it) } ?: return@launch
+            val equipo = repositorio.obtenerEquipo(equipoId) ?: return@launch
+            val visita = prueba.visitaId?.let { repositorio.obtenerVisita(it) }
+            original = prueba
+            // Una sola opción: la prueba como se evaluó ese día (al corregir no se cambia el tipo)
+            val criterioDelDia = TipoPruebaEntity(
+                tipoEquipo = equipo.tipo, nombre = prueba.tipoPrueba, unidad = prueba.unidad,
+                minimo = prueba.minimoUsado, maximo = prueba.maximoUsado
+            )
+            val esLibre = prueba.minimoUsado == null && prueba.maximoUsado == null
+            val anterior = repositorio.pruebaAnteriorA(prueba)
+            _estado.update {
+                it.copy(
+                    pruebaId = prueba.id,
+                    equipoId = equipo.id,
+                    visitaId = prueba.visitaId,
+                    numeroVisita = visita?.numero.orEmpty(),
+                    codigoEquipo = equipo.codigo,
+                    tipoEquipo = equipo.tipo,
+                    opciones = listOf(criterioDelDia),
+                    tipoPruebaId = criterioDelDia.id,
+                    nombreLibre = if (esLibre) prueba.tipoPrueba else "",
+                    valorMedido = Reglas.formatearNumero(prueba.valorMedido),
+                    temperatura = Reglas.formatearNumero(prueba.temperaturaAmbiente),
+                    resultadoManual = if (esLibre) prueba.aprobada else null,
+                    observaciones = prueba.observaciones,
+                    tecnico = prueba.tecnico,
+                    valorAnterior = anterior?.valorMedido
+                )
+            }
+            recalcular()
+        }
+    }
 
     fun onTipoPruebaChange(id: Long) {
         _estado.update {

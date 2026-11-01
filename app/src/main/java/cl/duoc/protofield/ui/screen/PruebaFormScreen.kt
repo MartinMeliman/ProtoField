@@ -65,8 +65,10 @@ fun PruebaFormScreen(
     navController: NavController,
     equipoId: Long,
     visitaId: Long,
+    pruebaId: Long = -1,
     viewModel: PruebaViewModel = viewModel()
 ) {
+    LaunchedEffect(equipoId) { viewModel.cargar(equipoId, visitaId.siExiste(), pruebaId.siExiste()) }
     val estado by viewModel.estado.collectAsState()
     val tipo = estado.seleccionada
     val unidad = tipo?.unidad.orEmpty()
